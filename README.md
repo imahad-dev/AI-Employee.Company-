@@ -1,5 +1,7 @@
 # Autonomous AI Software Company Platform V1
 
+[![CI](https://github.com/imahad-dev/AI-Employee.Company-/actions/workflows/ci.yml/badge.svg)](https://github.com/imahad-dev/AI-Employee.Company-/actions/workflows/ci.yml)
+
 Local-first platform for running a 14-agent AI software company pipeline with streamed progress, SQLite persistence, generated artifacts, and human approval gates.
 
 ## Quick Start
@@ -35,3 +37,10 @@ The dashboard can create a GitHub repository, generate a pull request from appro
 - `MAX_PIPELINE_LOOPS=10`.
 - File writes, dependency installs, commits, shell commands, and deployment actions are stored as approval requests before any mutation.
 - The Performance Agent is deferred to V1.1 and represented as a UI placeholder.
+
+## Repository Quality
+
+- GitHub Actions runs backend tests, backend compile checks, and frontend production builds on every push and pull request.
+- Dependabot opens weekly dependency update PRs for Python, npm, and GitHub Actions.
+- Pull request and issue templates guide contributors through validation, risk review, and safety checks.
+- Release preparation is documented in `docs/release-guide.md`.
