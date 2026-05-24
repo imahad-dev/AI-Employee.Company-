@@ -1,0 +1,37 @@
+# Autonomous AI Software Company Platform V1
+
+Local-first platform for running a 14-agent AI software company pipeline with streamed progress, SQLite persistence, generated artifacts, and human approval gates.
+
+## Quick Start
+
+Backend:
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+## GitHub Delivery
+
+The dashboard can create a GitHub repository, generate a pull request from approval-gated workspace files, run PR preflight checks, and poll merge-readiness status. Paste a GitHub token in the project GitHub workflow panel; the token is kept in memory for the current backend process and is not written to SQLite.
+
+## Safe Defaults
+
+- `PROVIDER_MODE=mock` by default, so development does not spend API credits.
+- Project-level provider selection supports Anthropic, OpenAI, Gemini, Groq, OpenRouter, and local OpenAI-compatible model servers.
+- `MAX_PIPELINE_LOOPS=10`.
+- File writes, dependency installs, commits, shell commands, and deployment actions are stored as approval requests before any mutation.
+- The Performance Agent is deferred to V1.1 and represented as a UI placeholder.
