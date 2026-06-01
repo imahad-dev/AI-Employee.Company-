@@ -6,6 +6,21 @@ Local-first platform for running a 14-agent AI software company pipeline with st
 
 ## Quick Start
 
+Docker:
+
+```powershell
+copy .env.example .env
+docker compose up --build
+```
+
+Open `http://localhost:3000`. The API runs at `http://localhost:8000`.
+
+One-command local helper on Windows:
+
+```powershell
+.\scripts\dev.ps1 start
+```
+
 Backend:
 
 ```powershell
@@ -41,6 +56,18 @@ The dashboard can create a GitHub repository, generate a pull request from appro
 ## Repository Quality
 
 - GitHub Actions runs backend tests, backend compile checks, and frontend production builds on every push and pull request.
+- Docker image builds are checked in CI so the one-command local launch stays healthy.
 - Dependabot opens weekly dependency update PRs for Python, npm, and GitHub Actions.
 - Pull request and issue templates guide contributors through validation, risk review, and safety checks.
 - Release preparation is documented in `docs/release-guide.md`.
+
+## Common Commands
+
+```powershell
+.\scripts\dev.ps1 test
+.\scripts\dev.ps1 build
+.\scripts\dev.ps1 docker-up
+.\scripts\dev.ps1 docker-down
+```
+
+On Unix-like shells, the same tasks are available through `make test`, `make build`, and `make docker-up`.
