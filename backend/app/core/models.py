@@ -12,6 +12,8 @@ ProjectType = Literal["webapp", "dashboard", "game", "system", "workflow"]
 ProjectStatus = Literal["running", "paused", "completed", "failed"]
 ApprovalKind = Literal["file_write", "dependency_install", "shell_command", "git_commit", "deployment_plan"]
 ProviderMode = Literal["mock", "anthropic", "openai", "gemini", "groq", "openrouter", "local"]
+ActionRisk = Literal["read", "draft", "write", "destructive", "first_contact"]
+ActionStatus = Literal["queued", "approved", "rejected", "cancelled", "executed", "blocked"]
 
 
 def utc_now() -> datetime:
@@ -100,6 +102,34 @@ class ApprovalPolicy(BaseModel):
     max_auto_loop_count: int = 10
 
 
+class ProjectBudget(BaseModel):
+    max_cost_usd: float = 10.0
+    max_total_tokens: int = 250_000
+    max_pending_actions: int = 20
+
+
+class ConnectorSetting(BaseModel):
+    enabled: bool = False
+    allowed_capabilities: list[str] = Field(default_factory=list)
+
+
+class ActionRequest(BaseModel):
+    action_id: str = Field(default_factory=lambda: str(uuid4()))
+    project_id: str
+    connector_id: str
+    capability: str
+    normalized_target: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    risk: ActionRisk
+    status: ActionStatus = "queued"
+    reason: str
+    attempt_id: str | None = None
+    payload_hash: str | None = None
+    reviewer_note: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    resolved_at: datetime | None = None
+
+
 class AuditLog(BaseModel):
     audit_id: str = Field(default_factory=lambda: str(uuid4()))
     project_id: str | None = None
@@ -135,6 +165,22 @@ class AgentRun(BaseModel):
     output: dict[str, Any] = Field(default_factory=dict)
     errors: list[str] = Field(default_factory=list)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    duration_ms: int = 0
+    attempt_count: int = 1
+    quality_score: int | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AgentExecutionLog(BaseModel):
+    log_id: str = Field(default_factory=lambda: str(uuid4()))
+    project_id: str
+    agent_id: str
+    latency_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    prompt_system: str = ""
+    prompt_user: str = ""
+    json_repair_success: bool = False
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -144,6 +190,7 @@ class Summary(BaseModel):
     after_agent_count: int
     content: str
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    agent_quality: dict[str, dict[str, Any]] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -155,6 +202,7 @@ class AgentOutput(BaseModel):
     approvals: list[dict[str, Any]] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    json_repaired: bool = False
 
 
 class ProjectState(BaseModel):
@@ -167,6 +215,9 @@ class ProjectState(BaseModel):
     model_name: str | None = None
     agent_model_overrides: dict[str, str] = Field(default_factory=dict)
     repository: RepositorySettings = Field(default_factory=RepositorySettings)
+    mission_profile: str = "software_delivery"
+    connector_settings: dict[str, ConnectorSetting] = Field(default_factory=dict)
+    budget: ProjectBudget = Field(default_factory=ProjectBudget)
 
     sprint_plan: dict[str, Any] = Field(default_factory=dict)
     requirements: dict[str, Any] = Field(default_factory=dict)
@@ -191,6 +242,7 @@ class ProjectState(BaseModel):
     approval_policy: ApprovalPolicy = Field(default_factory=ApprovalPolicy)
     events: list[RunEvent] = Field(default_factory=list)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
+    agent_quality: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     current_phase: str = "intake"
     active_agent: str = "project_manager"
@@ -220,6 +272,7 @@ class CreateProjectRequest(BaseModel):
     provider_api_key: str | None = None
     provider_base_url: str | None = None
     budget_warning_usd: float | None = None
+    mission_profile: str = "software_delivery"
 
 
 class ProjectCredentialsRequest(BaseModel):
@@ -243,6 +296,13 @@ class GitHubRepositoryCreateRequest(BaseModel):
     private: bool = True
 
 
+class SecretStatus(BaseModel):
+    project_id: str
+    provider_api_key: bool = False
+    provider_base_url: bool = False
+    github_token: bool = False
+
+
 class ApprovalPolicyRequest(BaseModel):
     approval_policy: ApprovalPolicy
 
@@ -258,3 +318,22 @@ class ProjectResponse(BaseModel):
 class BuildAgentRequest(BaseModel):
     agent_id: AgentId
     instructions: str | None = None
+
+
+class ConnectorSettingsRequest(BaseModel):
+    connector_id: str
+    enabled: bool = False
+    allowed_capabilities: list[str] = Field(default_factory=list)
+
+
+class ActionProposalRequest(BaseModel):
+    connector_id: str
+    capability: str
+    target: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    attempt_id: str | None = None
+
+
+class ActionResolutionRequest(BaseModel):
+    approved: bool
+    note: str | None = None

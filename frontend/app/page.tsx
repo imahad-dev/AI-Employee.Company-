@@ -28,10 +28,12 @@ import {
   AuditLog,
   Approval,
   ApprovalPolicy,
+  Connector,
   GitHubPreflight,
   GitHubPullRequest,
   GitHubPullRequestStatus,
   GitHubStatus,
+  SecretStatus,
   Project,
   ProviderProfile,
   ProviderStatus,
@@ -45,6 +47,7 @@ import {
   createGitHubPullRequest,
   exportProjectUrl,
   fetchAgents,
+  fetchConnectors,
   fetchGitHubPreflight,
   fetchGitHubPullRequestStatus,
   fetchProjectAudit,
@@ -55,95 +58,29 @@ import {
   getGitHubStatus,
   getProject,
   getProviderStatus,
+  getSecretStatus,
+  loadOperatorKey,
   reject,
   saveGitHubCredentials,
+  saveOperatorKey,
   saveProjectCredentials,
   startProject,
   updateProjectPolicy,
-  updateProjectRepository
+  updateProjectRepository,
+  updateConnectorSettings
 } from "@/lib/api";
-
-const phases = [
-  "Phase 1 - Intake & planning",
-  "Phase 2 - Design",
-  "Phase 3 - Development",
-  "Phase 4 - Quality & security",
-  "Phase 5 - Deployment & docs",
-  "Phase 6 - Monitoring & maintenance"
-];
-
-const templates = [
-  {
-    id: "saas-dashboard",
-    title: "SaaS Dashboard",
-    type: "dashboard",
-    timeline: "4 weeks",
-    stack: "Next.js, FastAPI, SQLite now, PostgreSQL-ready later, Vercel deployment plan",
-    brief:
-      "Build a SaaS analytics dashboard for e-commerce stores. Include sales charts, inventory tracking, customer segments, real-time alerts, CSV export, multi-tenant auth, admin settings, and clean onboarding."
-  },
-  {
-    id: "web-app",
-    title: "Customer Web App",
-    type: "webapp",
-    timeline: "3 weeks",
-    stack: "Next.js, Tailwind, FastAPI, approval-gated deployment plan",
-    brief:
-      "Build a polished customer-facing web app with account creation, dashboard, profile settings, notifications, billing-ready structure, responsive UI, and documentation."
-  },
-  {
-    id: "internal-tool",
-    title: "Internal Workflow Tool",
-    type: "workflow",
-    timeline: "2 weeks",
-    stack: "FastAPI, Next.js, SQLite, role-based access, local-first deployment",
-    brief:
-      "Build an internal workflow tool for a small team. Include task intake, approvals, status tracking, searchable records, exports, admin controls, and audit history."
-  },
-  {
-    id: "game",
-    title: "Interactive Game",
-    type: "game",
-    timeline: "3 weeks",
-    stack: "React, TypeScript, canvas or Three.js as needed, local deploy plan",
-    brief:
-      "Build a browser game with a complete playable loop, score tracking, responsive controls, restart flow, polished visuals, sound-ready hooks, and testing plan."
-  }
-];
-
-function friendlyPhase(phase?: string) {
-  const map: Record<string, string> = {
-    intake: "Planning the work",
-    requirements: "Writing requirements",
-    architecture: "Designing architecture",
-    design: "Designing screens",
-    components: "Planning components",
-    frontend: "Building frontend",
-    backend: "Building backend",
-    database: "Preparing data layer",
-    testing: "Testing",
-    review: "Reviewing code",
-    security: "Checking security",
-    deployment: "Preparing deployment",
-    docs: "Writing docs",
-    monitoring: "Preparing maintenance",
-    completed: "Completed"
-  };
-  return map[phase ?? ""] ?? "Ready";
-}
-
-function nextAction(project: Project | null, pendingApprovals: Approval[]) {
-  if (!project) return "Choose a template or describe your idea, then create a project.";
-  if (pendingApprovals.length) return `${pendingApprovals.length} approval${pendingApprovals.length === 1 ? "" : "s"} waiting for your review.`;
-  if (project.status === "paused") return "Project is ready. Start the AI company when you are comfortable.";
-  if (project.status === "running") return `${friendlyPhase(project.current_phase)} is in progress.`;
-  if (project.status === "completed") return "Pipeline completed. Review artifacts and approval history.";
-  return "Something needs attention. Check the activity log.";
-}
+import { ActivitySidebar } from "@/components/ActivitySidebar";
+import { CommandCenter } from "@/components/CommandCenter";
+import { HeroBand } from "@/components/HeroBand";
+import { OverviewMetrics } from "@/components/OverviewMetrics";
+import { ProjectGallery } from "@/components/ProjectGallery";
+import { WorkflowExperience } from "@/components/WorkflowExperience";
+import { friendlyPhase, phases, templates } from "@/components/project-data";
 
 export default function Home() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [providers, setProviders] = useState<ProviderProfile[]>([]);
+  const [connectors, setConnectors] = useState<Connector[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedArtifactIndex, setSelectedArtifactIndex] = useState(0);
@@ -175,6 +112,8 @@ export default function Home() {
   const [providerApiKey, setProviderApiKey] = useState("");
   const [providerBaseUrl, setProviderBaseUrl] = useState("");
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [secretStatus, setSecretStatus] = useState<SecretStatus | null>(null);
+  const [operatorKey, setOperatorKey] = useState("");
   const [timeline, setTimeline] = useState(templates[0].timeline);
   const [stack, setStack] = useState(templates[0].stack);
   const [activeTemplate, setActiveTemplate] = useState(templates[0].id);
@@ -184,6 +123,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    setOperatorKey(loadOperatorKey());
     fetchAgents()
       .then((data) => {
         setAgents(data.agents);
@@ -195,6 +135,9 @@ export default function Home() {
         setProviders(data.providers);
         setProviderMode(data.active_provider || "mock");
       })
+      .catch(() => undefined);
+    fetchConnectors()
+      .then((data) => setConnectors(data.connectors))
       .catch(() => undefined);
     loadProjects();
   }, []);
@@ -290,6 +233,25 @@ export default function Home() {
     }
   }
 
+  async function toggleConnector(connector: Connector, enabled: boolean) {
+    if (!project) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await updateConnectorSettings(project.project_id, {
+        connector_id: connector.id,
+        enabled,
+        allowed_capabilities: enabled ? connector.capabilities.map((capability) => capability.id) : []
+      });
+      setProject(result.project);
+      await loadProjects();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function refreshProject() {
     if (!project) return;
     const result = await getProject(project.project_id);
@@ -306,9 +268,16 @@ export default function Home() {
     try {
       const status = await getProviderStatus(projectId);
       setProviderStatus(status);
+      const secrets = await getSecretStatus(projectId);
+      setSecretStatus(secrets);
     } catch {
       setProviderStatus(null);
+      setSecretStatus(null);
     }
+  }
+
+  function handleSaveOperatorKey() {
+    saveOperatorKey(operatorKey);
   }
 
   async function refreshGitHubStatus(projectId: string) {
@@ -540,21 +509,11 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      <section className="hero-band">
-        <div>
-          <div className="eyebrow"><Sparkles size={15} /> Autonomous software company</div>
-          <h1>Describe the product. The AI team plans, builds, reviews, and prepares it for deployment.</h1>
-          <p>
-            Start safely in mock mode, then switch the same workflow to Claude, Gemini, Groq, OpenRouter, OpenAI,
-            or a local model when you are ready.
-          </p>
-        </div>
-        <div className="hero-card">
-          <span className="status-pill">{project?.status ?? "ready"}</span>
-          <strong>{friendlyPhase(project?.current_phase)}</strong>
-          <p>{nextAction(project, pendingApprovals)}</p>
-        </div>
-      </section>
+      <HeroBand project={project} pendingApprovals={pendingApprovals} />
+
+      <div className="mission-shell">
+        <WorkflowExperience project={project} />
+      </div>
 
       <section className="workspace-grid">
         <aside className="setup-column">
@@ -648,6 +607,17 @@ export default function Home() {
                     onChange={(event) => setProviderBaseUrl(event.target.value)}
                   />
                 </div>
+                <div className="field">
+                  <label htmlFor="operator-key">Operator API key</label>
+                  <input
+                    id="operator-key"
+                    type="password"
+                    placeholder="Only needed when OPERATOR_API_KEY is enabled"
+                    value={operatorKey}
+                    onChange={(event) => setOperatorKey(event.target.value)}
+                  />
+                </div>
+                <button disabled={busy} onClick={handleSaveOperatorKey}>Save operator key locally</button>
                 {selectedProvider && (
                   <p className="hint">
                     {selectedProvider.kind}. {selectedProvider.notes}
@@ -657,7 +627,7 @@ export default function Home() {
                 {project && (
                   <div className={providerStatus?.ready ? "ready-box" : "warning-box"}>
                     <strong>{providerStatus?.ready ? "Provider ready" : "Provider needs setup"}</strong>
-                    <span>{providerStatus?.message ?? "Save credentials to check readiness."}</span>
+                    <span>{providerStatus?.message ?? "Save credentials to check readiness."} {secretStatus?.provider_api_key ? "Encrypted project key stored." : ""}</span>
                     <button disabled={busy} onClick={handleSaveCredentials}>Save credentials</button>
                   </div>
                 )}
@@ -673,64 +643,23 @@ export default function Home() {
             {error && <div className="error-box"><AlertCircle size={15} /> {error}</div>}
           </div>
 
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <p className="section-title">Saved work</p>
-                <h2>Project gallery</h2>
-              </div>
-              <Archive size={20} />
-            </div>
-            <div className="project-list">
-              {projects.length === 0 && <p className="muted">Saved projects will appear here after you create one.</p>}
-              {projects.slice(0, 6).map((item) => (
-                <button
-                  key={item.project_id}
-                  className={`project-row ${project?.project_id === item.project_id ? "active" : ""}`}
-                  onClick={() => openProject(item.project_id)}
-                >
-                  <strong>{friendlyPhase(item.current_phase)}</strong>
-                  <span>{item.project_type} - {item.status}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          <ProjectGallery
+            projects={projects}
+            activeProjectId={project?.project_id}
+            onOpenProject={openProject}
+          />
         </aside>
 
         <section className="main-column">
-          <div className="overview-row">
-            <div className="metric-card">
-              <span>Progress</span>
-              <strong>{progress}%</strong>
-              <div className="progress-track"><div style={{ width: `${progress}%` }} /></div>
-            </div>
-            <div className="metric-card">
-              <span>Completed agents</span>
-              <strong>{project?.completed_agents.length ?? 0}/14</strong>
-            </div>
-            <div className="metric-card">
-              <span>Approvals</span>
-              <strong>{pendingApprovals.length}</strong>
-            </div>
-            <div className="metric-card">
-              <span>Estimated cost</span>
-              <strong>${project?.token_usage.estimated_cost_usd.toFixed(2) ?? "0.00"}</strong>
-            </div>
-          </div>
+          <OverviewMetrics project={project} pendingApprovals={pendingApprovals} />
 
-          <div className="panel command-center">
-            <div>
-              <p className="section-title">2. Run the company</p>
-              <h2>{project ? friendlyPhase(project.current_phase) : "No project yet"}</h2>
-              <p className="muted">{nextAction(project, pendingApprovals)}</p>
-            </div>
-            <div className="action-row end">
-              <button className="primary" disabled={!project || busy || project.status === "running"} onClick={handleStart}>
-                <Play size={15} /> Start
-              </button>
-              <button disabled={!project || busy} onClick={refreshProject}><RefreshCcw size={15} /> Refresh</button>
-            </div>
-          </div>
+          <CommandCenter
+            project={project}
+            pendingApprovals={pendingApprovals}
+            busy={busy}
+            onStart={handleStart}
+            onRefresh={refreshProject}
+          />
 
           <div className="panel workflow-upgrade">
             <div className="panel-head">
@@ -745,6 +674,8 @@ export default function Home() {
               <div><strong>Approval gates</strong><span>Files, commands, commits, and deployment plans wait for review.</span></div>
               <div><strong>Memory control</strong><span>Summaries keep long projects cheaper and more focused.</span></div>
               <div><strong>Exportable work</strong><span>Download the project state, approvals, events, and artifacts.</span></div>
+              <div><strong>Quality retries</strong><span>Weak agent outputs are scored, corrected, and retried before handoff.</span></div>
+              <div><strong>Encrypted keys</strong><span>Project provider and GitHub tokens are stored encrypted at rest.</span></div>
             </div>
           </div>
 
@@ -764,6 +695,36 @@ export default function Home() {
                 <label><input type="checkbox" checked={pendingPolicy.require_commit_approval} onChange={() => togglePolicy("require_commit_approval")} /> Commits need approval</label>
                 <label><input type="checkbox" checked={pendingPolicy.require_deployment_approval} onChange={() => togglePolicy("require_deployment_approval")} /> Deployment needs approval</label>
                 <label><input type="checkbox" checked={pendingPolicy.block_on_provider_not_ready} onChange={() => togglePolicy("block_on_provider_not_ready")} /> Block if provider is not ready</label>
+              </div>
+            </div>
+          )}
+
+          {project && connectors.length > 0 && (
+            <div className="panel">
+              <div className="panel-head">
+                <div>
+                  <p className="section-title">Connected capabilities</p>
+                  <h2>Choose what this project can use</h2>
+                </div>
+                <Cpu size={20} />
+              </div>
+              <p className="hint">Research and drafting can run automatically. Any change to an external service always enters the approval queue first.</p>
+              <div className="connector-grid">
+                {connectors.map((connector) => {
+                  const setting = project.connector_settings?.[connector.id];
+                  const enabled = Boolean(setting?.enabled);
+                  const access = connector.capabilities.some((capability) => capability.risk === "write" || capability.risk === "destructive") ? "Approval required for changes" : "Read-only";
+                  return (
+                    <label className={`connector-item ${enabled ? "enabled" : ""}`} key={connector.id}>
+                      <input type="checkbox" checked={enabled} disabled={busy || connector.id === "governance"} onChange={(event) => toggleConnector(connector, event.target.checked)} />
+                      <span>
+                        <strong>{connector.name}</strong>
+                        <small>{connector.description}</small>
+                        <em>{connector.id === "governance" ? "Always on for budget protection" : access}</em>
+                      </span>
+                    </label>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -1072,6 +1033,13 @@ export default function Home() {
                       <h3>{String(selectedAgent.number).padStart(2, "0")} - {selectedAgent.name}</h3>
                       <p className="muted">{selectedAgent.role}</p>
                       <p className="route-note">Sends results to: <strong>{selectedAgent.sends}</strong></p>
+                      {project?.agent_quality?.[selectedAgent.id] && (
+                        <div className="quality-strip">
+                          <span>Quality {project.agent_quality[selectedAgent.id].score ?? "-"} / 10</span>
+                          <span>{project.agent_quality[selectedAgent.id].attempts ?? 1} attempt(s)</span>
+                          <span>{project.agent_quality[selectedAgent.id].duration_ms ?? 0} ms</span>
+                        </div>
+                      )}
                     </div>
                     <div>
                       {selectedAgent.tools.map((tool) => <span key={tool} className="tool-pill">{tool}</span>)}
@@ -1096,86 +1064,7 @@ export default function Home() {
         </section>
 
         <aside className="activity-column">
-          <div className="panel dark-help">
-            <div className="panel-head">
-              <div>
-                <p className="section-title">Beginner guide</p>
-                <h2>How to use this</h2>
-              </div>
-              <HelpCircle size={20} />
-            </div>
-            <ol className="tutorial-list">
-              <li><strong>Pick a template.</strong><span>Start with a common product type so you do not face a blank page.</span></li>
-              <li><strong>Edit the brief.</strong><span>Write what the software should do in normal language.</span></li>
-              <li><strong>Click Create and run.</strong><span>Mock mode is safe and costs nothing.</span></li>
-              <li><strong>Approve changes.</strong><span>The system asks before writing files or deployment plans.</span></li>
-              <li><strong>Export results.</strong><span>Download everything as a ZIP when the run is useful.</span></li>
-            </ol>
-            <p className="key-note">API keys pasted in the interface are used for this local runtime and are not shown back in saved project data.</p>
-          </div>
-
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <p className="section-title">Activity</p>
-                <h2>What just happened</h2>
-              </div>
-              <Clock3 size={20} />
-            </div>
-            <div className="log">
-              {recentEvents.length === 0 && <p className="muted">Activity will appear here after you create and run a project.</p>}
-              {recentEvents.map((event) => (
-                <div key={event.event_id} className="log-item">
-                  <strong>{event.message}</strong>
-                  <span>{event.type}{event.agent_id ? ` from ${event.agent_id}` : ""}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel">
-            <p className="section-title">Memory control</p>
-            <h2>Summaries</h2>
-            {project?.summaries.length ? (
-              project.summaries.slice(-4).map((summary, index) => <p key={index} className="summary-note">{summary}</p>)
-            ) : (
-              <p className="muted">The Summarizer compresses context after every 3 completed employees to control cost.</p>
-            )}
-          </div>
-
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <p className="section-title">Enterprise audit</p>
-                <h2>Decision trail</h2>
-              </div>
-              <ShieldCheck size={20} />
-            </div>
-            <div className="audit-list">
-              {auditLogs.length === 0 && <p className="muted">Open or run a project to see an audit trail.</p>}
-              {auditLogs.slice(0, 8).map((item) => (
-                <div key={item.audit_id} className="audit-row">
-                  <strong>{item.action.replaceAll("_", " ")}</strong>
-                  <span>{item.actor} - {item.target ?? "project"}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-head">
-              <div>
-                <p className="section-title">Helpful tips</p>
-                <h2>Better prompts</h2>
-              </div>
-              <BookOpen size={20} />
-            </div>
-            <div className="tips-list">
-              <p>Say who will use the app, what screens they need, and what data matters most.</p>
-              <p>Keep real deployment in approval mode until credentials and budgets are ready.</p>
-              <p>Use local or mock models while testing workflows, then switch providers for quality runs.</p>
-            </div>
-          </div>
+          <ActivitySidebar project={project} recentEvents={recentEvents} auditLogs={auditLogs} />
         </aside>
       </section>
     </main>

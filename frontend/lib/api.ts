@@ -21,6 +21,9 @@ export type Project = {
   provider_mode?: string | null;
   model_name?: string | null;
   repository: RepositorySettings;
+  mission_profile: string;
+  connector_settings: Record<string, ConnectorSetting>;
+  budget: ProjectBudget;
   current_phase: string;
   active_agent: string;
   completed_agents: string[];
@@ -35,6 +38,27 @@ export type Project = {
     output_tokens: number;
     estimated_cost_usd: number;
   };
+  agent_quality: Record<string, { score?: number; issues?: string[]; attempts?: number; duration_ms?: number; last_run_at?: string }>;
+};
+
+export type ProjectBudget = {
+  max_cost_usd: number;
+  max_total_tokens: number;
+  max_pending_actions: number;
+};
+
+export type ConnectorSetting = {
+  enabled: boolean;
+  allowed_capabilities: string[];
+};
+
+export type Connector = {
+  id: string;
+  name: string;
+  kind: "mcp" | "native" | "mock";
+  description: string;
+  enabled_by_default: boolean;
+  capabilities: { id: string; risk: "read" | "draft" | "write" | "destructive"; description: string; requires_secret: boolean }[];
 };
 
 export type RepositorySettings = {
@@ -83,8 +107,16 @@ export type ProviderStatus = {
   provider: string;
   ready: boolean;
   has_runtime_key: boolean;
+  has_stored_key?: boolean;
   uses_env_key: boolean;
   message: string;
+};
+
+export type SecretStatus = {
+  project_id: string;
+  provider_api_key: boolean;
+  provider_base_url: boolean;
+  github_token: boolean;
 };
 
 export type GitHubStatus = {
@@ -175,14 +207,29 @@ export type AuditLog = {
 };
 
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
+  const operatorKey = typeof window !== "undefined" ? window.localStorage.getItem("operator_api_key") : "";
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) }
+    headers: {
+      "Content-Type": "application/json",
+      ...(operatorKey ? { "X-Operator-Key": operatorKey } : {}),
+      ...(init?.headers ?? {})
+    }
   });
   if (!response.ok) {
     throw new Error(await response.text());
   }
   return response.json() as Promise<T>;
+}
+
+export function saveOperatorKey(value: string) {
+  if (typeof window === "undefined") return;
+  if (value) window.localStorage.setItem("operator_api_key", value);
+  else window.localStorage.removeItem("operator_api_key");
+}
+
+export function loadOperatorKey() {
+  return typeof window === "undefined" ? "" : window.localStorage.getItem("operator_api_key") ?? "";
 }
 
 export async function fetchAgents() {
@@ -191,6 +238,17 @@ export async function fetchAgents() {
 
 export async function fetchProviders() {
   return json<{ active_provider: string; providers: ProviderProfile[]; local_base_url: string }>("/api/providers");
+}
+
+export async function fetchConnectors() {
+  return json<{ connectors: Connector[] }>("/api/connectors");
+}
+
+export async function updateConnectorSettings(projectId: string, input: ConnectorSetting & { connector_id: string }) {
+  return json<{ project: Project }>(`/api/projects/${projectId}/connectors`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
 }
 
 export async function createProject(input: {
@@ -216,6 +274,10 @@ export async function startProject(projectId: string) {
 
 export async function getProviderStatus(projectId: string) {
   return json<ProviderStatus>(`/api/projects/${projectId}/provider-status`);
+}
+
+export async function getSecretStatus(projectId: string) {
+  return json<SecretStatus>(`/api/projects/${projectId}/secrets`);
 }
 
 export async function saveProjectCredentials(projectId: string, input: { provider_api_key?: string; provider_base_url?: string }) {

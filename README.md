@@ -50,6 +50,9 @@ The dashboard can create a GitHub repository, generate a pull request from appro
 - `PROVIDER_MODE=mock` by default, so development does not spend API credits.
 - Project-level provider selection supports Anthropic, OpenAI, Gemini, Groq, OpenRouter, and local OpenAI-compatible model servers.
 - `MAX_PIPELINE_LOOPS=10`.
+- Optional `OPERATOR_API_KEY` protects mutating API endpoints when enabled.
+- Project provider and GitHub tokens are stored encrypted at rest with `SECRET_VAULT_KEY`.
+- Agent outputs are quality-scored and retried before handoff when they miss required detail.
 - File writes, dependency installs, commits, shell commands, and deployment actions are stored as approval requests before any mutation.
 - The Performance Agent is deferred to V1.1 and represented as a UI placeholder.
 

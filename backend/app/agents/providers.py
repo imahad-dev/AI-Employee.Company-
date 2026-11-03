@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
@@ -7,11 +8,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from json_repair import repair_json
 
 from app.agents.catalog import AGENT_CONFIGS
 from app.core.config import Settings
 from app.core.credentials import get_project_credentials
+from app.core.http import get_http_client
 from app.core.models import AgentId, AgentOutput, ProjectState, TokenUsage
+
+_provider_semaphore = asyncio.Semaphore(5)
 
 
 @dataclass(frozen=True)
@@ -114,7 +119,7 @@ class AnthropicProvider(LlmProvider):
             messages=[{"role": "user", "content": user}],
         )
         text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text")
-        output = parse_agent_output(text)
+        output, _ = parse_agent_output_with_meta(text)
         usage = getattr(response, "usage", None)
         if usage:
             output.token_usage = TokenUsage(
@@ -157,12 +162,12 @@ class OpenAICompatibleProvider(LlmProvider):
                 {"role": "user", "content": user},
             ],
         }
-        async with httpx.AsyncClient(timeout=self.settings.provider_timeout_seconds) as client:
-            response = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
+        async with _provider_semaphore:
+            response = await get_http_client().post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
             response.raise_for_status()
         data = response.json()
         text = data["choices"][0]["message"]["content"]
-        output = parse_agent_output(text)
+        output, _ = parse_agent_output_with_meta(text)
         usage = data.get("usage") or {}
         output.token_usage = TokenUsage(
             input_tokens=usage.get("prompt_tokens", 0),
@@ -192,12 +197,12 @@ class GeminiProvider(LlmProvider):
                 "responseMimeType": "application/json",
             },
         }
-        async with httpx.AsyncClient(timeout=self.settings.provider_timeout_seconds) as client:
-            response = await client.post(url, params={"key": self.api_key}, json=payload)
+        async with _provider_semaphore:
+            response = await get_http_client().post(url, params={"key": self.api_key}, json=payload)
             response.raise_for_status()
         data = response.json()
         text = "".join(part.get("text", "") for part in data["candidates"][0]["content"].get("parts", []))
-        output = parse_agent_output(text)
+        output, _ = parse_agent_output_with_meta(text)
         usage = data.get("usageMetadata") or {}
         output.token_usage = TokenUsage(
             input_tokens=usage.get("promptTokenCount", 0),
@@ -220,14 +225,37 @@ def resolve_model(state: ProjectState, agent_id: AgentId, default_model: str) ->
     return state.agent_model_overrides.get(agent_id.value) or state.model_name or default_model
 
 
+def extract_json_substring(text: str) -> str:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return text
+    return text[start : end + 1]
+
+
 def parse_agent_output(text: str) -> AgentOutput:
+    output, _ = parse_agent_output_with_meta(text)
+    return output
+
+
+def parse_agent_output_with_meta(text: str) -> tuple[AgentOutput, bool]:
     stripped = text.strip()
     if stripped.startswith("```"):
         match = re.search(r"```(?:json)?\s*(.*?)\s*```", stripped, re.DOTALL)
         if match:
             stripped = match.group(1).strip()
-    payload = json.loads(stripped)
-    return AgentOutput.model_validate(payload)
+    candidate = extract_json_substring(stripped)
+    json_repaired = False
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        repaired = repair_json(candidate)
+        payload = json.loads(repaired)
+        json_repaired = True
+    output = AgentOutput.model_validate(payload)
+    if json_repaired:
+        output = output.model_copy(update={"json_repaired": True})
+    return output, json_repaired
 
 
 def estimate_cost(input_tokens: int, output_tokens: int) -> float:

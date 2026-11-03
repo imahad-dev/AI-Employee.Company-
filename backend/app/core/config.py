@@ -4,6 +4,9 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_DEV_VAULT_KEY = "local-dev-secret-vault-key-change-me"
+PROMPT_LOG_MAX_CHARS = 2000
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
@@ -44,6 +47,10 @@ class Settings(BaseSettings):
     max_pipeline_loops: int = Field(default=10, alias="MAX_PIPELINE_LOOPS")
     summarizer_interval: int = Field(default=3, alias="SUMMARIZER_INTERVAL")
     budget_warning_usd: float = Field(default=10.0, alias="BUDGET_WARNING_USD")
+    operator_api_key: str | None = Field(default=None, alias="OPERATOR_API_KEY")
+    secret_vault_key: str = Field(default=DEFAULT_DEV_VAULT_KEY, alias="SECRET_VAULT_KEY")
+    agent_max_attempts: int = Field(default=2, alias="AGENT_MAX_ATTEMPTS")
+    agent_quality_threshold: int = Field(default=8, alias="AGENT_QUALITY_THRESHOLD")
 
 
 @lru_cache

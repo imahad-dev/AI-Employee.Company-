@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timezone
+import os
 from typing import Any
 
 from app.agents.catalog import AGENT_CONFIGS
 from app.agents.prompts import build_user_prompt, system_prompt
 from app.agents.providers import LlmProvider
 from app.agents.validators import semantic_errors
-from app.core.config import Settings
+from app.core.agent_runtime import AgentTimer, build_retry_prompt, evaluate_agent_output
+from app.core.config import PROMPT_LOG_MAX_CHARS, Settings
 from app.core.diffing import attach_diff
 from app.core.events import broker
-from app.core.models import AgentId, AgentRun, ApprovalRequest, Artifact, AuditLog, ProjectState, RunEvent, utc_now
+from app.core.models import AgentExecutionLog, AgentId, AgentRun, ApprovalRequest, Artifact, AuditLog, ConnectorSetting, ProjectState, RunEvent, utc_now
+from app.core.policy import create_action_request
 from app.core.routing import route_next, should_summarize
 from app.core.summarizer import summarize_state
 from app.core.workspace import assert_inside, ensure_project_workspace
 from app.db.sqlite import SQLiteStore
+
+_running_tasks: dict[str, asyncio.Task[None]] = {}
+
+
+def _truncate_prompt(value: str, limit: int = PROMPT_LOG_MAX_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit]
 
 
 class PipelineService:
@@ -23,7 +33,6 @@ class PipelineService:
         self.store = store
         self.provider = provider
         self.settings = settings
-        self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def start(self, project_id: str) -> ProjectState:
         state = self._require_project(project_id)
@@ -32,13 +41,25 @@ class PipelineService:
         self.store.save_project(state)
         self._audit(state.project_id, "pipeline_started", "project", {"phase": state.current_phase})
         await self._event(state.project_id, "project", "Pipeline started")
-        if project_id not in self._tasks or self._tasks[project_id].done():
-            self._tasks[project_id] = asyncio.create_task(self.run(project_id))
+        self._spawn_run_task(project_id)
         return state
+
+    async def resume(self, project_id: str) -> ProjectState:
+        state = self._require_project(project_id)
+        self._audit(state.project_id, "pipeline_resumed_after_restart", "project", {"phase": state.current_phase})
+        await self._event(state.project_id, "project", "Pipeline resumed from checkpoint")
+        self._spawn_run_task(project_id)
+        return state
+
+    def _spawn_run_task(self, project_id: str) -> None:
+        if project_id not in _running_tasks or _running_tasks[project_id].done():
+            _running_tasks[project_id] = asyncio.create_task(self.run(project_id))
 
     async def run(self, project_id: str) -> None:
         state = self._require_project(project_id)
         while state.status == "running":
+            if await self._pause_if_budget_exhausted(state):
+                return
             if should_summarize(state, self.settings.summarizer_interval):
                 await self._summarize(state)
                 state = self._require_project(project_id)
@@ -117,10 +138,34 @@ class PipelineService:
         await self._event(state.project_id, "agent", f"{config.name} started", agent_id.value)
 
         try:
-            output = await self.provider.complete_agent(agent_id, system_prompt(config), build_user_prompt(agent_id, state), state)
+            base_prompt = build_user_prompt(agent_id, state)
+            agent_system = system_prompt(config)
+            attempts = 0
+            quality = None
+            output = None
+            duration_ms = 0
+            prompt = base_prompt
+            max_attempts = max(1, self.settings.agent_max_attempts)
+            while attempts < max_attempts:
+                attempts += 1
+                with AgentTimer() as timer:
+                    output = await self.provider.complete_agent(agent_id, agent_system, prompt, state)
+                duration_ms += timer.duration_ms
+                quality = evaluate_agent_output(agent_id, output, state)
+                if quality.score >= self.settings.agent_quality_threshold or not quality.retryable or attempts >= max_attempts:
+                    break
+                self._audit(state.project_id, "agent_quality_retry", agent_id.value, {"attempt": attempts, "score": quality.score, "issues": quality.issues})
+                await self._event(state.project_id, "agent", f"{config.name} retrying with quality fixes", agent_id.value, {"score": quality.score, "issues": quality.issues})
+                prompt = build_retry_prompt(base_prompt, quality)
+
+            if output is None or quality is None:
+                raise RuntimeError("agent did not return output")
+
             errors = semantic_errors(agent_id, output)
             if errors:
                 raise ValueError("; ".join(errors))
+            if quality.score < self.settings.agent_quality_threshold:
+                raise ValueError("; ".join(quality.issues))
 
             setattr_target = getattr(state, config.state_key)
             if config.state_key == "incidents":
@@ -166,13 +211,41 @@ class PipelineService:
             state.token_usage.estimated_cost_usd = round(state.token_usage.estimated_cost_usd + output.token_usage.estimated_cost_usd, 4)
             if state.current_phase == "completed":
                 state.status = "completed"
+            state.agent_quality[agent_id.value] = {
+                "score": quality.score,
+                "issues": quality.issues,
+                "attempts": attempts,
+                "duration_ms": duration_ms,
+                "last_run_at": utc_now().isoformat(),
+            }
 
-            run = AgentRun(project_id=state.project_id, agent_id=agent_id.value, status="completed", output=output.model_dump(), token_usage=output.token_usage)
+            run = AgentRun(
+                project_id=state.project_id,
+                agent_id=agent_id.value,
+                status="completed",
+                output=output.model_dump(),
+                token_usage=output.token_usage,
+                duration_ms=duration_ms,
+                attempt_count=attempts,
+                quality_score=quality.score,
+            )
             self.store.add_agent_run(run)
+            self.store.save_agent_execution_log(
+                AgentExecutionLog(
+                    project_id=state.project_id,
+                    agent_id=agent_id.value,
+                    latency_ms=duration_ms,
+                    input_tokens=output.token_usage.input_tokens,
+                    output_tokens=output.token_usage.output_tokens,
+                    prompt_system=_truncate_prompt(agent_system),
+                    prompt_user=_truncate_prompt(prompt),
+                    json_repair_success=output.json_repaired,
+                )
+            )
             state.updated_at = utc_now()
             self.store.save_project(state)
-            self._audit(state.project_id, "agent_completed", agent_id.value, {"phase": state.current_phase, "cost": output.token_usage.estimated_cost_usd})
-            await self._event(state.project_id, "agent", f"{config.name} completed", agent_id.value, {"phase": state.current_phase})
+            self._audit(state.project_id, "agent_completed", agent_id.value, {"phase": state.current_phase, "cost": output.token_usage.estimated_cost_usd, "quality_score": quality.score, "attempts": attempts})
+            await self._event(state.project_id, "agent", f"{config.name} completed", agent_id.value, {"phase": state.current_phase, "quality_score": quality.score, "attempts": attempts})
         except Exception as exc:
             message = f"{config.name} failed: {exc}"
             state.errors.append(message)
@@ -197,6 +270,46 @@ class PipelineService:
         self.store.save_project(state)
         self._audit(state.project_id, "context_summarized", "summarizer", {"after_agent_count": summary.after_agent_count})
         await self._event(state.project_id, "summary", f"Summarized context after {summary.after_agent_count} agents")
+
+    async def _pause_if_budget_exhausted(self, state: ProjectState) -> bool:
+        total_tokens = state.token_usage.input_tokens + state.token_usage.output_tokens
+        exhausted = (
+            state.token_usage.estimated_cost_usd >= state.budget.max_cost_usd
+            or total_tokens >= state.budget.max_total_tokens
+        )
+        if not exhausted:
+            return False
+
+        # Governance actions are policy-classified like every other write. Existing
+        # projects receive the built-in connector when they first hit this guard.
+        state.connector_settings.setdefault("governance", ConnectorSetting(enabled=True))
+        action = create_action_request(
+            state,
+            "governance",
+            "budget.increase",
+            state.project_id,
+            {
+                "estimated_cost_usd": state.token_usage.estimated_cost_usd,
+                "total_tokens": total_tokens,
+                "max_cost_usd": state.budget.max_cost_usd,
+                "max_total_tokens": state.budget.max_total_tokens,
+            },
+            approved_targets=self.store.approved_action_targets(state.project_id),
+            pending_action_count=self.store.pending_action_count(state.project_id),
+        )
+        self.store.add_action_request(action)
+        state.status = "paused"
+        state.errors.append("Project budget ceiling reached; awaiting a reviewed budget increase.")
+        state.updated_at = utc_now()
+        self.store.save_project(state)
+        self._audit(state.project_id, "pipeline_budget_paused", action.action_id, {"payload_hash": action.payload_hash, "status": action.status})
+        await self._event(
+            state.project_id,
+            "cost",
+            "Pipeline paused because its project budget ceiling was reached.",
+            data={"action_id": action.action_id, "cost_usd": state.token_usage.estimated_cost_usd, "total_tokens": total_tokens},
+        )
+        return True
 
     async def _event(self, project_id: str, event_type: str, message: str, agent_id: str | None = None, data: dict[str, Any] | None = None) -> None:
         event = RunEvent(project_id=project_id, type=event_type, message=message, agent_id=agent_id, data=data or {})
@@ -223,7 +336,18 @@ class PipelineService:
         target = (workspace_root / raw_path).resolve()
         assert_inside(workspace_root, target)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content if isinstance(content, str) else str(content), encoding="utf-8")
+        text_content = content if isinstance(content, str) else str(content)
+        temp_file = target.with_suffix(".tmp")
+        try:
+            with open(temp_file, "w", encoding="utf-8") as handle:
+                handle.write(text_content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_file, target)
+        except Exception:
+            if temp_file.exists():
+                temp_file.unlink()
+            raise
         self._audit(approval.project_id, "workspace_file_written", raw_path, {"approval_id": approval.approval_id})
 
     def _audit(self, project_id: str | None, action: str, target: str | None = None, metadata: dict[str, Any] | None = None) -> None:

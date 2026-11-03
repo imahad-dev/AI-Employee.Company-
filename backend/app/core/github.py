@@ -96,6 +96,23 @@ class GitHubClient:
             payload["sha"] = sha
         await self._request("PUT", f"/repos/{owner}/{repo}/contents/{path}", json=payload)
 
+    async def create_tree(self, owner: str, repo: str, tree_items: list[dict[str, Any]], base_tree_sha: str) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/git/trees",
+            json={"base_tree": base_tree_sha, "tree": tree_items},
+        )
+
+    async def create_commit(self, owner: str, repo: str, message: str, tree_sha: str, parent_sha: str) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/git/commits",
+            json={"message": message, "tree": tree_sha, "parents": [parent_sha]},
+        )
+
+    async def update_branch_ref(self, owner: str, repo: str, branch: str, sha: str) -> None:
+        await self._request("PATCH", f"/repos/{owner}/{repo}/git/refs/heads/{branch}", json={"sha": sha, "force": False})
+
     async def create_pull_request(self, owner: str, repo: str, title: str, body: str, head: str, base: str) -> dict[str, Any]:
         return await self._request("POST", f"/repos/{owner}/{repo}/pulls", json={"title": title, "body": body, "head": head, "base": base})
 
@@ -234,23 +251,29 @@ async def create_project_pull_request(
     client = GitHubClient(token, timeout_seconds=timeout_seconds)
     base_sha = await client.get_branch_sha(owner, repo, base_branch)
     await client.create_branch(owner, repo, working_branch, base_sha)
+    try:
+        working_sha = await client.get_branch_sha(owner, repo, working_branch)
+    except GitHubWorkflowError:
+        working_sha = base_sha
 
+    tree_items = []
     changed_paths: list[str] = []
     for file_info in files:
         rel_path = str(file_info["path"])
         file_path = workspace_root / rel_path
         content = file_path.read_text(encoding="utf-8")
-        file_sha = await client.get_file_sha(owner, repo, rel_path, working_branch)
-        await client.put_file(
-            owner,
-            repo,
-            rel_path,
-            content,
-            working_branch,
-            f"Update {rel_path} from AI company workspace",
-            file_sha,
-        )
+        tree_items.append({"path": rel_path, "mode": "100644", "type": "blob", "content": content})
         changed_paths.append(rel_path)
+
+    tree = await client.create_tree(owner, repo, tree_items, working_sha)
+    commit = await client.create_commit(
+        owner,
+        repo,
+        f"AI company delivery for {state.project_id}",
+        str(tree["sha"]),
+        working_sha,
+    )
+    await client.update_branch_ref(owner, repo, working_branch, str(commit["sha"]))
 
     pr_title = title or f"AI company output for {state.project_id}"
     pr_body = body or build_pull_request_summary(state, files)
